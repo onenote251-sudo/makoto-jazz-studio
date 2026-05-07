@@ -7,7 +7,15 @@ import matplotlib.pyplot as plt
 GAS_URL = st.secrets["GAS_URL"]
 IDS = {"TAKUROKU": "1UxtJsNqonfIJ5UjFzZQLdXikaRMd7XLA", "PHRASE": "1wyKwSZpb9qPNld8uTqMQ5q6-g6-UfGm5"}
 
-st.set_page_config(page_title="まことの宅録スタジオ", layout="centered")
+# --- NotebookLM対策：標準的なMP3に強制整形する関数 ---
+def fix_audio_for_notebooklm(audio_bytes):
+    # いったん読み込んで、標準規格（44.1kHz / 192kbps）で書き出し直す
+    seg = AudioSegment.from_file(io.BytesIO(audio_bytes))
+    buf = io.BytesIO()
+    seg.export(buf, format="mp3", bitrate="192k", parameters=["-ar", "44100", "-ac", "2"])
+    return buf.getvalue()
+
+st.set_page_config(page_title="まことの宅録スタジオ")
 st.title("🎸 まことの宅録スタジオ")
 
 mode = st.sidebar.radio("メニュー", ["🔴 即録音", "✂️ 編集：トリミング"])
@@ -17,85 +25,62 @@ try:
 
     if mode == "🔴 即録音":
         from streamlit_mic_recorder import mic_recorder
-        st.subheader("練習をそのまま録音・保存")
+        st.subheader("練習を録音（AI最適化済み）")
         type_choice = st.radio("カテゴリー", ["Song", "フレーズ"], horizontal=True)
-        target = st.selectbox("対象を選択", init_data["songs"] if type_choice=="Song" else init_data["phrases"])
+        target = st.selectbox("対象", init_data["songs"] if type_choice=="Song" else init_data["phrases"])
         file_name = f"{target}_{datetime.date.today()}.mp3"
         f_id = IDS["TAKUROKU"] if type_choice=="Song" else IDS["PHRASE"]
 
         audio = mic_recorder(start_prompt="🔴 録音開始", stop_prompt="⏹️ 保存", key='rec')
         if audio:
-            with st.spinner("保存中..."):
-                b64 = base64.b64encode(audio['bytes']).decode('utf-8')
-                requests.post(GAS_URL, json={"folderId": f_id, "fileName": file_name, "fileData": b64})
-                st.success(f"保存完了: {file_name}")
-    
+            with st.spinner("NotebookLM用に変換中..."):
+                # ここで「AI用整形」を実行
+                clean_audio = fix_audio_for_notebooklm(audio['bytes'])
+                b64 = base64.b64encode(clean_audio).decode('utf-8')
+                requests.post(GAS_URL, json={"folderId": f_id, "fileName": file_name, "fileData": b64, "mode": "record"})
+                st.success("保存完了！自動で通番を振りました。")
+
     else:
-        st.subheader("✂️ 範囲を確認してトリミング")
-        edit_folder = st.radio("フォルダを選択", ["02_宅録", "03_フレーズ"], horizontal=True)
+        st.subheader("✂️ 範囲を選んで上書き")
+        edit_folder = st.radio("フォルダ", ["02_宅録", "03_フレーズ"], horizontal=True)
         f_id = IDS["TAKUROKU"] if edit_folder=="02_宅録" else IDS["PHRASE"]
         
         file_list = requests.get(f"{GAS_URL}?action=list&folderId={f_id}").json()
-        selected_file = st.selectbox("ファイルを選択", file_list, format_func=lambda x: x['name'])
+        selected_file = st.selectbox("ファイル", file_list, format_func=lambda x: x['name'])
         
-        if st.button("ファイルを読み込む"):
-            with st.spinner("音声を解析中..."):
-                b64_res = requests.get(f"{GAS_URL}?action=download&fileId={selected_file['id']}").text
-                audio_bytes = base64.b64decode(b64_res)
-                st.session_state['edit_bytes'] = audio_bytes
-                st.session_state['edit_name'] = selected_file['name']
-                seg = AudioSegment.from_file(io.BytesIO(audio_bytes))
-                st.session_state['duration'] = len(seg) / 1000.0
-                samples = np.array(seg.get_array_of_samples())
-                if seg.channels == 2: samples = samples[::2]
-                st.session_state['samples'] = samples
+        if st.button("読み込む"):
+            b64_res = requests.get(f"{GAS_URL}?action=download&fileId={selected_file['id']}").text
+            st.session_state['edit_bytes'] = base64.b64decode(b64_res)
+            st.session_state['edit_name'] = selected_file['name']
+            seg = AudioSegment.from_file(io.BytesIO(st.session_state['edit_bytes']))
+            st.session_state['samples'] = np.array(seg.get_array_of_samples())[::seg.channels]
+            st.session_state['duration'] = len(seg) / 1000.0
 
         if 'edit_bytes' in st.session_state:
             dur = st.session_state['duration']
+            start_t, end_t = st.slider("範囲(秒)", 0.0, dur, (0.0, dur), step=0.1)
             
-            # --- 波形表示 ---
-            start_t, end_t = st.slider("範囲指定 (秒)", 0.0, dur, (0.0, dur), step=0.1)
-            
-            fig, ax = plt.subplots(figsize=(10, 2.5))
-            ax.plot(st.session_state['samples'], color='lightgray', alpha=0.7, linewidth=0.5)
+            # 波形表示（略）
+            fig, ax = plt.subplots(figsize=(10, 2))
+            ax.plot(st.session_state['samples'], color='gray', alpha=0.5, linewidth=0.5)
             s_idx = int((start_t / dur) * len(st.session_state['samples']))
             e_idx = int((end_t / dur) * len(st.session_state['samples']))
-            ax.plot(np.arange(s_idx, e_idx), st.session_state['samples'][s_idx:e_idx], color='red', linewidth=0.8)
+            ax.plot(np.arange(s_idx, e_idx), st.session_state['samples'][s_idx:e_idx], color='red')
             ax.axis('off')
             st.pyplot(fig)
 
-            # --- プレビュー機能 ---
-            col1, col2 = st.columns([1, 2])
-            with col1:
-                st.write("\n") # 位置調整
-                preview_btn = st.button("▶️ 選択範囲を試聴")
-            
-            if preview_btn:
-                with st.spinner("切り出し中..."):
-                    seg = AudioSegment.from_file(io.BytesIO(st.session_state['edit_bytes']))
-                    preview_seg = seg[start_t*1000 : end_t*1000]
-                    p_buf = io.BytesIO()
-                    preview_seg.export(p_buf, format="mp3")
-                    st.audio(p_buf.getvalue(), format="audio/mp3", autoplay=True)
-                    st.caption("↑ 選択した範囲だけが流れます")
-
-            st.divider()
-            # 元のファイル全体も確認したい時のためのプレイヤー
-            with st.expander("元のファイル全体を再生"):
-                st.audio(st.session_state['edit_bytes'], format="audio/mp3")
-
             if st.button("✅ この範囲で上書き保存", type="primary"):
-                with st.spinner("更新中..."):
+                with st.spinner("AI用に最適化して上書き中..."):
                     seg = AudioSegment.from_file(io.BytesIO(st.session_state['edit_bytes']))
                     trimmed = seg[start_t*1000 : end_t*1000]
+                    # 上書き時も「AI用整形」を実行
                     buf = io.BytesIO()
-                    trimmed.export(buf, format="mp3", bitrate="192k")
+                    trimmed.export(buf, format="mp3", bitrate="192k", parameters=["-ar", "44100", "-ac", "2"])
+                    
                     new_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
-                    requests.post(GAS_URL, json={"folderId": f_id, "fileName": st.session_state['edit_name'], "fileData": new_b64})
-                    st.success(f"上書き完了: {st.session_state['edit_name']}")
-                    # 完了後にデータをクリア
-                    for key in ['edit_bytes', 'samples', 'duration', 'edit_name']:
-                        if key in st.session_state: del st.session_state[key]
+                    requests.post(GAS_URL, json={"folderId": f_id, "fileName": st.session_state['edit_name'], "fileData": new_b64, "mode": "edit"})
+                    st.success("NotebookLM対応形式で上書きしました！")
+                    del st.session_state['edit_bytes']
 
 except Exception as e:
     st.error(f"エラー: {e}")
