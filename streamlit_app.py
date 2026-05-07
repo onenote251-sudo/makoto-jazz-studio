@@ -8,7 +8,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from google.oauth2 import service_account
 
-# --- 設定（GASのIDをそのまま使用） ---
+# --- 設定 ---
 IDS = {
     "PRACTICE": "19zxiuyYOdNSuWJ2f9k92O90lKP7Ty4euOMTWLigJAuM",
     "STANDARD": "1A4JldliQvJvGv51dEnw_tpkhIkTXZlzRtiyZU7eKgzw",
@@ -16,24 +16,22 @@ IDS = {
     "FOLDER_PHRASE": "1wyKwSZpb9qPNld8uTqMQ5q6-g6-UfGm5"
 }
 
-# --- Google認証設定 ---
 def get_gcp_creds():
-    # StreamlitのSecretsから認証情報を読み込む
     creds_info = st.secrets["gcp_service_account"]
+    # 秘密鍵の改行コードを正しく処理する
+    if "private_key" in creds_info:
+        creds_info["private_key"] = creds_info["private_key"].replace("\\n", "\n")
     creds = service_account.Credentials.from_service_account_info(creds_info)
     return creds.with_scopes([
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
     ])
 
-# --- データ取得関数 ---
 def get_initial_data(creds):
     gc = gspread.authorize(creds)
-    # 練習記録スプレッドシート
     p_ss = gc.open_by_key(IDS["PRACTICE"])
     keys = list(filter(None, p_ss.worksheet('key').col_values(1)))
     phrases = list(filter(None, p_ss.worksheet('フレーズ名').col_values(1)))
-    # スタンダード曲集
     s_ss = gc.open_by_key(IDS["STANDARD"])
     songs = list(filter(None, s_ss.get_worksheet(0).col_values(1)))
     return keys, phrases, songs
@@ -51,16 +49,15 @@ def get_next_serial(drive_service, folder_id, prefix):
         except: continue
     return f"{max_num + 1:02}"
 
-# --- アプリ画面構成 ---
 st.set_page_config(page_title="まことの宅録スタジオ", layout="centered")
 st.title("🎸 まことの宅録スタジオ")
 
+# 診断用：エラーの詳細を表示するように変更
 try:
     creds = get_gcp_creds()
     drive_service = build('drive', 'v3', credentials=creds)
     keys, phrases, songs = get_initial_data(creds)
 
-    # ユーザー入力
     date_val = st.date_input("日付", datetime.date.today())
     mode = st.radio("タイプ", ["フレーズ", "Song"], horizontal=True)
 
@@ -74,45 +71,34 @@ try:
         display_name = song_val
 
     st.divider()
-
-    # 録音
-    st.write("録音後にトリミングが可能です")
     audio = mic_recorder(start_prompt="🔴 録音開始", stop_prompt="⏹️ 終了", key='recorder')
 
     if audio:
-        # 録音データの読み込み
         audio_bytes = audio['bytes']
         raw_audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
         duration = len(raw_audio) / 1000.0
-        
-        st.audio(audio_bytes) # プレビュー再生
-        
-        # トリミングスライダー
-        start_t, end_t = st.slider("保存する範囲を選択 (秒)", 0.0, duration, (0.0, duration))
+        st.audio(audio_bytes)
+        start_t, end_t = st.slider("保存範囲(秒)", 0.0, duration, (0.0, duration))
         
         if st.button("✅ Googleドライブへ保存", type="primary"):
-            with st.spinner("変換中..."):
-                # トリミング
+            with st.spinner("MP3変換中..."):
                 trimmed = raw_audio[start_t*1000 : end_t*1000]
-                
-                # ファイル名決定
                 prefix = f"{display_name}_{date_val}"
                 folder_id = IDS["FOLDER_PHRASE"] if mode == "フレーズ" else IDS["FOLDER_TAKUROKU"]
                 serial = get_next_serial(drive_service, folder_id, prefix)
                 file_name = f"{prefix}_{serial}.mp3"
                 
-                # MP3へ変換 (192kbps / 高品質)
                 mp3_io = io.BytesIO()
                 trimmed.export(mp3_io, format="mp3", bitrate="192k")
                 mp3_io.seek(0)
                 
-                # アップロード
                 file_metadata = {'name': file_name, 'parents': [folder_id]}
                 media = MediaIoBaseUpload(mp3_io, mimetype='audio/mpeg')
                 drive_service.files().create(body=file_metadata, media_body=media).execute()
-                
                 st.success(f"保存完了: {file_name}")
                 st.balloons()
 
 except Exception as e:
-    st.info("現在は設定準備中です。Googleの認証設定（Secrets）を完了させると動作します。")
+    # エラーの正体を隠さず表示する
+    st.error(f"エラーが発生しました: {e}")
+    st.info("スプレッドシートやフォルダの共有設定、またはSecretsの形式を確認してください。")
