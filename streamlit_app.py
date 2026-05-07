@@ -1,86 +1,71 @@
 import streamlit as st
-from streamlit_mic_recorder import mic_recorder
 from pydub import AudioSegment
 import io, datetime, requests, base64
 
-# --- 設定 ---
 GAS_URL = st.secrets["GAS_URL"]
-IDS = {
-    "TAKUROKU": "1UxtJsNqonfIJ5UjFzZQLdXikaRMd7XLA",
-    "PHRASE": "1wyKwSZpb9qPNld8uTqMQ5q6-g6-UfGm5"
-}
+IDS = {"TAKUROKU": "1UxtJsNqonfIJ5UjFzZQLdXikaRMd7XLA", "PHRASE": "1wyKwSZpb9qPNld8uTqMQ5q6-g6-UfGm5"}
 
-st.set_page_config(page_title="まことの宅録スタジオ", layout="centered")
+st.set_page_config(page_title="まことの宅録スタジオ")
 st.title("🎸 まことの宅録スタジオ")
 
-# サイドメニュー
-mode = st.sidebar.radio("メニュー", ["🔴 練習：即録音", "✂️ 編集：トリミング・上書き"])
+mode = st.sidebar.radio("メニュー", ["🔴 即録音", "✂️ 編集：ファイルを選んで上書き"])
 
 try:
-    # GAS（受取窓口）からリストを取得
-    res = requests.get(GAS_URL).json()
-    
-    if mode == "🔴 練習：即録音":
+    # 初期データ取得
+    init_data = requests.get(f"{GAS_URL}?action=init").json()
+
+    if mode == "🔴 即録音":
+        from streamlit_mic_recorder import mic_recorder
         st.subheader("練習をそのまま録音・保存")
-        col1, col2 = st.columns(2)
-        with col1:
-            type_choice = st.radio("カテゴリー", ["Song", "フレーズ"], horizontal=True)
-        with col2:
-            date_val = st.date_input("日付", datetime.date.today())
-        
-        if type_choice == "Song":
-            target = st.selectbox("曲名を選択", res["songs"])
-            file_name = f"{target}_{date_val}.mp3"
-            f_id = IDS["TAKUROKU"]
-        else:
-            key_val = st.selectbox("Key", res["keys"])
-            phrase_val = st.selectbox("フレーズ名", res["phrases"])
-            file_name = f"{phrase_val}({key_val})_{date_val}.mp3"
-            f_id = IDS["PHRASE"]
+        type_choice = st.radio("カテゴリー", ["Song", "フレーズ"], horizontal=True)
+        target = st.selectbox("対象", init_data["songs"] if type_choice=="Song" else init_data["phrases"])
+        file_name = f"{target}_{datetime.date.today()}.mp3"
+        f_id = IDS["TAKUROKU"] if type_choice=="Song" else IDS["PHRASE"]
 
-        st.divider()
-        audio = mic_recorder(start_prompt="🔴 録音開始", stop_prompt="⏹️ 終了して保存", key='rec_immed')
-
+        audio = mic_recorder(start_prompt="🔴 録音開始", stop_prompt="⏹️ 保存", key='rec')
         if audio:
-            st.audio(audio['bytes'])
-            with st.spinner("Googleドライブへ保存中..."):
-                b64_data = base64.b64encode(audio['bytes']).decode('utf-8')
-                requests.post(GAS_URL, json={"folderId": f_id, "fileName": file_name, "fileData": b64_data})
-                st.success(f"保存完了: {file_name}")
-                st.balloons()
+            b64 = base64.b64encode(audio['bytes']).decode('utf-8')
+            requests.post(GAS_URL, json={"folderId": f_id, "fileName": file_name, "fileData": b64})
+            st.success(f"保存完了: {file_name}")
 
     else:
-        st.subheader("録音済みファイルをトリミング")
-        st.info("※録音した後にスライダーで範囲を決めて、上書き保存できます。")
+        st.subheader("ドライブのファイルをトリミング")
+        # 1. フォルダ選択
+        edit_folder = st.radio("フォルダを選択", ["02_宅録", "03_フレーズ"], horizontal=True)
+        f_id = IDS["TAKUROKU"] if edit_folder=="02_宅録" else IDS["PHRASE"]
         
-        audio_edit = mic_recorder(start_prompt="🔴 編集用録音", stop_prompt="⏹️ 録音終了", key='rec_edit')
+        # 2. ファイル一覧取得
+        file_list = requests.get(f"{GAS_URL}?action=list&folderId={f_id}").json()
         
-        if audio_edit:
-            raw_audio = AudioSegment.from_file(io.BytesIO(audio_edit['bytes']))
-            duration = len(raw_audio) / 1000.0
-            st.audio(audio_edit['bytes'])
+        if not file_list:
+            st.info("ファイルがありません。")
+        else:
+            selected_file = st.selectbox("編集するファイルを選択", file_list, format_func=lambda x: x['name'])
             
-            start_t, end_t = st.slider("保存範囲(秒)", 0.0, duration, (0.0, duration))
-            
-            st.divider()
-            ed_type = st.radio("保存先", ["Song", "フレーズ"], horizontal=True, key="ed_type")
-            if ed_type == "Song":
-                target_ed = st.selectbox("曲名", res["songs"], key="ed_song")
-                file_name_ed = f"{target_ed}_{datetime.date.today()}.mp3"
-                f_id_ed = IDS["TAKUROKU"]
-            else:
-                target_ed = st.selectbox("フレーズ", res["phrases"], key="ed_phrase")
-                file_name_ed = f"{target_ed}_{datetime.date.today()}.mp3"
-                f_id_ed = IDS["PHRASE"]
+            if st.button("ファイルを読み込む"):
+                with st.spinner("読み込み中..."):
+                    b64_res = requests.get(f"{GAS_URL}?action=download&fileId={selected_file['id']}").text
+                    st.session_state['edit_bytes'] = base64.b64decode(b64_res)
+                    st.session_state['edit_name'] = selected_file['name']
 
-            if st.button("✅ この範囲で上書き/保存", type="primary"):
-                with st.spinner("高品質MP3に変換中..."):
-                    trimmed = raw_audio[start_t*1000 : end_t*1000]
-                    buf = io.BytesIO()
-                    trimmed.export(buf, format="mp3", bitrate="192k")
-                    b64_data_ed = base64.b64encode(buf.getvalue()).decode('utf-8')
-                    requests.post(GAS_URL, json={"folderId": f_id_ed, "fileName": file_name_ed, "fileData": b64_data_ed})
-                    st.success(f"更新完了: {file_name_ed}")
+            if 'edit_bytes' in st.session_state:
+                st.write(f"編集中のファイル: {st.session_state['edit_name']}")
+                audio_data = io.BytesIO(st.session_state['edit_bytes'])
+                segment = AudioSegment.from_file(audio_data)
+                duration = len(segment) / 1000.0
+                
+                st.audio(st.session_state['edit_bytes'])
+                start_t, end_t = st.slider("保存範囲(秒)", 0.0, duration, (0.0, duration))
+                
+                if st.button("✅ この範囲で上書き保存", type="primary"):
+                    with st.spinner("更新中..."):
+                        trimmed = segment[start_t*1000 : end_t*1000]
+                        out_buf = io.BytesIO()
+                        trimmed.export(out_buf, format="mp3", bitrate="192k")
+                        new_b64 = base64.b64encode(out_buf.getvalue()).decode('utf-8')
+                        requests.post(GAS_URL, json={"folderId": f_id, "fileName": st.session_state['edit_name'], "fileData": new_b64})
+                        st.success("上書きが完了しました！")
+                        del st.session_state['edit_bytes'] # 掃除
 
 except Exception as e:
-    st.error(f"システム接続エラー: {e}")
+    st.error(f"システムエラー: {e}")
