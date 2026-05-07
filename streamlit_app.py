@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 GAS_URL = st.secrets["GAS_URL"]
 IDS = {"TAKUROKU": "1UxtJsNqonfIJ5UjFzZQLdXikaRMd7XLA", "PHRASE": "1wyKwSZpb9qPNld8uTqMQ5q6-g6-UfGm5"}
 
-st.set_page_config(page_title="まことの宅録スタジオ")
+st.set_page_config(page_title="まことの宅録スタジオ", layout="centered")
 st.title("🎸 まことの宅録スタジオ")
 
 mode = st.sidebar.radio("メニュー", ["🔴 即録音", "✂️ 編集：トリミング"])
@@ -31,22 +31,19 @@ try:
                 st.success(f"保存完了: {file_name}")
     
     else:
-        st.subheader("✂️ 波形を見ながらトリミング")
+        st.subheader("✂️ 範囲を確認してトリミング")
         edit_folder = st.radio("フォルダを選択", ["02_宅録", "03_フレーズ"], horizontal=True)
         f_id = IDS["TAKUROKU"] if edit_folder=="02_宅録" else IDS["PHRASE"]
         
-        # ファイルリスト取得
         file_list = requests.get(f"{GAS_URL}?action=list&folderId={f_id}").json()
         selected_file = st.selectbox("ファイルを選択", file_list, format_func=lambda x: x['name'])
         
         if st.button("ファイルを読み込む"):
-            with st.spinner("音声をダウンロード中..."):
+            with st.spinner("音声を解析中..."):
                 b64_res = requests.get(f"{GAS_URL}?action=download&fileId={selected_file['id']}").text
                 audio_bytes = base64.b64decode(b64_res)
-                # 記憶
                 st.session_state['edit_bytes'] = audio_bytes
                 st.session_state['edit_name'] = selected_file['name']
-                # 解析
                 seg = AudioSegment.from_file(io.BytesIO(audio_bytes))
                 st.session_state['duration'] = len(seg) / 1000.0
                 samples = np.array(seg.get_array_of_samples())
@@ -54,23 +51,38 @@ try:
                 st.session_state['samples'] = samples
 
         if 'edit_bytes' in st.session_state:
-            # スライダー
             dur = st.session_state['duration']
+            
+            # --- 波形表示 ---
             start_t, end_t = st.slider("範囲指定 (秒)", 0.0, dur, (0.0, dur), step=0.1)
-
-            # --- 波形描画（選択範囲をハイライト） ---
-            fig, ax = plt.subplots(figsize=(10, 3))
-            ax.plot(st.session_state['samples'], color='gray', alpha=0.5, linewidth=0.5)
-            # 選択範囲だけ色を変える
+            
+            fig, ax = plt.subplots(figsize=(10, 2.5))
+            ax.plot(st.session_state['samples'], color='lightgray', alpha=0.7, linewidth=0.5)
             s_idx = int((start_t / dur) * len(st.session_state['samples']))
             e_idx = int((end_t / dur) * len(st.session_state['samples']))
             ax.plot(np.arange(s_idx, e_idx), st.session_state['samples'][s_idx:e_idx], color='red', linewidth=0.8)
-            ax.set_title(f"Selected: {start_t}s - {end_t}s")
             ax.axis('off')
             st.pyplot(fig)
 
-            # 音声プレイヤー（安定再生のため format 指定）
-            st.audio(st.session_state['edit_bytes'], format="audio/mp3")
+            # --- プレビュー機能 ---
+            col1, col2 = st.columns([1, 2])
+            with col1:
+                st.write("\n") # 位置調整
+                preview_btn = st.button("▶️ 選択範囲を試聴")
+            
+            if preview_btn:
+                with st.spinner("切り出し中..."):
+                    seg = AudioSegment.from_file(io.BytesIO(st.session_state['edit_bytes']))
+                    preview_seg = seg[start_t*1000 : end_t*1000]
+                    p_buf = io.BytesIO()
+                    preview_seg.export(p_buf, format="mp3")
+                    st.audio(p_buf.getvalue(), format="audio/mp3", autoplay=True)
+                    st.caption("↑ 選択した範囲だけが流れます")
+
+            st.divider()
+            # 元のファイル全体も確認したい時のためのプレイヤー
+            with st.expander("元のファイル全体を再生"):
+                st.audio(st.session_state['edit_bytes'], format="audio/mp3")
 
             if st.button("✅ この範囲で上書き保存", type="primary"):
                 with st.spinner("更新中..."):
@@ -80,8 +92,10 @@ try:
                     trimmed.export(buf, format="mp3", bitrate="192k")
                     new_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
                     requests.post(GAS_URL, json={"folderId": f_id, "fileName": st.session_state['edit_name'], "fileData": new_b64})
-                    st.success("上書き完了！")
-                    del st.session_state['edit_bytes']
+                    st.success(f"上書き完了: {st.session_state['edit_name']}")
+                    # 完了後にデータをクリア
+                    for key in ['edit_bytes', 'samples', 'duration', 'edit_name']:
+                        if key in st.session_state: del st.session_state[key]
 
 except Exception as e:
     st.error(f"エラー: {e}")
