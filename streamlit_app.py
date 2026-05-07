@@ -17,9 +17,10 @@ IDS = {
 }
 
 def get_gcp_creds():
-    creds_info = st.secrets["gcp_service_account"]
-    # 秘密鍵の改行コードを正しく処理する
+    # st.secretsは読み取り専用なので、dictとしてコピーして扱う
+    creds_info = dict(st.secrets["gcp_service_account"])
     if "private_key" in creds_info:
+        # 改行コードのズレを補正
         creds_info["private_key"] = creds_info["private_key"].replace("\\n", "\n")
     creds = service_account.Credentials.from_service_account_info(creds_info)
     return creds.with_scopes([
@@ -52,7 +53,6 @@ def get_next_serial(drive_service, folder_id, prefix):
 st.set_page_config(page_title="まことの宅録スタジオ", layout="centered")
 st.title("🎸 まことの宅録スタジオ")
 
-# 診断用：エラーの詳細を表示するように変更
 try:
     creds = get_gcp_creds()
     drive_service = build('drive', 'v3', credentials=creds)
@@ -71,6 +71,7 @@ try:
         display_name = song_val
 
     st.divider()
+    # 録音
     audio = mic_recorder(start_prompt="🔴 録音開始", stop_prompt="⏹️ 終了", key='recorder')
 
     if audio:
@@ -99,6 +100,4 @@ try:
                 st.balloons()
 
 except Exception as e:
-    # エラーの正体を隠さず表示する
     st.error(f"エラーが発生しました: {e}")
-    st.info("スプレッドシートやフォルダの共有設定、またはSecretsの形式を確認してください。")
